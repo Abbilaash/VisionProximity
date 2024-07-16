@@ -1,0 +1,39 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Real-time Object Detection</title>
+</head>
+<body>
+    <h1>Real-time Object Detection</h1>
+    <div>
+        <img id="videoElement" width="640" height="480">
+    </div>
+
+    <script type="text/javascript">
+        var video = document.getElementById('videoElement');
+
+        function loadCamera() {
+            if (navigator.mediaDevices && navigator.mediaDevices.getUserMedia) {
+                navigator.mediaDevices.getUserMedia({ video: true })
+                    .then(function(stream) {
+                        video.srcObject = stream;
+                        video.play();
+                    })
+                    .catch(function(error) {
+                        console.log("Error accessing the camera: ", error);
+                    });
+            } else {
+                console.log("getUserMedia not supported");
+            }
+        }
+
+        // Call function to load camera on page load
+        window.onload = loadCamera;
+
+        // Continuously update the video element with processed frames
+        setInterval(function() {
+            video.src = '/video_feed?' + new Date().getTime();  // Append timestamp to prevent caching
+        }, 100);  // Adjust interval as needed for desired frame rate
+    </script>
+</body>
+</html>
