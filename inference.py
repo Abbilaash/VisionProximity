@@ -2,10 +2,16 @@ import serial
 import torch
 import cv2
 import time
-import face_recognition
-import numpy as np
-import os
+import pyttsx3
+import threading
+import speech_recognition as sr
 
+# Initialize pyttsx3
+engine = pyttsx3.init()
+
+def speak(text):
+    engine.say(text)
+    engine.runAndWait()
 
 # Load the trained YOLOv5 model
 model = torch.hub.load('ultralytics/yolov5', 'custom', path='yolov5s.pt')
@@ -28,81 +34,107 @@ def read_distance():
             line = ser.readline().decode('utf-8', errors='ignore').strip()
             return int(line)
     except ValueError:
-        print("[-]Some error occured in calculating distance.")
+        print("[-] Some error occurred in calculating distance.")
         return None
     return None
 
+def speech_thread():
+    while True:
+        if message_queue:
+            message = message_queue.pop(0)
+            speak(message)
+        time.sleep(1)  # Small delay to prevent busy waiting
 
-# loading thw known faces
-known_face_encodings = []
-known_face_names = []
+def voice_input_thread():
+    recognizer = sr.Recognizer()
+    microphone = sr.Microphone()
 
-def load_known_faces(directory):
-    for filename in os.listdir(directory):
-        if filename.endswith('.jpg') or filename.endswith('.png'):
-            filepath = os.path.join(directory, filename)
-            image = face_recognition.load_image_file(filepath)
-            encoding = face_recognition.face_encodings(image)[0]
-            known_face_encodings.append(encoding)
-            known_face_names.append(os.path.splitext(filename)[0])
+    while True:
+        with microphone as source:
+            print("Listening for user commands...")
+            recognizer.adjust_for_ambient_noise(source)
+            audio = recognizer.listen(source)
 
-load_known_faces('known_faces')
+        try:
+            command = recognizer.recognize_google(audio)
+            print(f"User said: {command}")
 
+            # Add your custom voice commands handling here
+            if "what is this" in command.lower():
+                if last_object:
+                    speak(f"The object in front of you is {last_object}")
 
-process_frame_interval = 2
-frame_count = 0
+        except sr.UnknownValueError:
+            print("Sorry, I did not understand that.")
+        except sr.RequestError as e:
+            print(f"Could not request results from Google Speech Recognition service; {e}")
 
+# Create a queue for messages
+message_queue = []
+
+# Start the speech thread
+threading.Thread(target=speech_thread, daemon=True).start()
+
+# Start the voice input thread
+threading.Thread(target=voice_input_thread, daemon=True).start()
+
+# Initialize variables for tracking
+last_distance = None
+last_object = None
+last_speak_time = 0
+speak_interval = 5  # seconds
 
 while True:
     ret, frame = camera.read()
     if not ret:
-        print("[-]Failed to grab frame!")
+        print("[-] Failed to grab frame!")
         break
-
-    frame_count += 1
-    if frame_count % process_frame_interval != 0:
-        continue
 
     # Perform object detection
     results = model(frame)
 
     # Extract bounding boxes and labels
+    closest_object = None
+    closest_distance = float('inf')
+    frame_center_x = frame.shape[1] / 2
+
     for *xyxy, conf, cls in results.xyxy[0]:
-        label = f'{model.names[int(cls)]} {conf:.2f}'
+        label = model.names[int(cls)]
         xyxy = [int(x) for x in xyxy]
+
+        # Calculate center of the bounding box
+        bbox_center_x = (xyxy[0] + xyxy[2]) / 2
+        center_distance = abs(frame_center_x - bbox_center_x)
 
         # Read distance data from Arduino
         distance_mm = read_distance()
         if distance_mm is not None:
             distance_in = distance_mm / 25.4  # Convert to inches
-            label += f' | Distance: {distance_in:.2f} inches'
-            print(f"A {model.names[int(cls)]} is at a distance {distance_in:.2f} inches from you")
-        
-        if model.names[int(cls)] == "person":
-            # extract the ROI of the person
-            top, left, bottom, right = xyxy[1], xyxy[0], xyxy[3], xyxy[2]
-            roi = frame[top:bottom, left:right]
-            rgb_roi = cv2.cvtColor(roi, cv2.COLOR_BGR2RGB) # converting to RGB
-            face_locations = face_recognition.face_locations(rgb_roi)
-            face_encodings = face_recognition.face_encodings(rgb_roi, face_locations)
-            for face_encoding in face_encodings:
-                # See if the face is a match for the known faces
-                matches = face_recognition.compare_faces(known_face_encodings, face_encoding)
-                name = "Unknown"
-
-                # Or instead, use the known face with the smallest distance to the new face
-                face_distances = face_recognition.face_distance(known_face_encodings, face_encoding)
-                best_match_index = np.argmin(face_distances)
-                if matches[best_match_index]:
-                    name = known_face_names[best_match_index]
-
-                print(name)
-
-
+            if center_distance < closest_distance:
+                closest_distance = center_distance
+                closest_object = (label, distance_in)
 
         # Draw bounding box and label on the frame
         frame = cv2.rectangle(frame, (xyxy[0], xyxy[1]), (xyxy[2], xyxy[3]), (0, 255, 0), 2)
         frame = cv2.putText(frame, label, (xyxy[0], xyxy[1] - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.9, (0, 255, 0), 2)
+
+    # Check and speak the closest object
+    if closest_object:
+        label, distance = closest_object
+        current_time = time.time()
+        
+        if last_distance is None:
+            last_distance = distance
+            last_object = label
+
+        if last_object != label or abs(last_distance - distance) > 2:  # threshold to avoid repeated messages
+            if current_time - last_speak_time > speak_interval:
+                direction = "nearing" if distance < last_distance else "moving away"
+                message = f"A {label} is {distance:.2f} inches away and is {direction}"
+                message_queue.append(message)
+                last_speak_time = current_time
+                last_distance = distance
+                last_object = label
 
     # Display the frame
     cv2.imshow('Webcam Image', frame)
